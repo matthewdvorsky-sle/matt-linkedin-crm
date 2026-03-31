@@ -409,71 +409,20 @@ function getSorted(cs) {
 
 // ─── Sheets Sync ────────────────────────────────────────────────────────────────
 async function pullFromSheets() {
-  const url = (state.settings.sheetsUrl||'').replace(/[/\\]+$/,'');
-  if (!url) return;
-  isLoading = true; syncStatus = 'loading'; render();
-  try {
-    const res = await fetch(url + '?action=read');
-    const contacts = await res.json();
-    if (Array.isArray(contacts) && contacts.length > 0) {
-      state.contacts = contacts;
-      state.settings.lastSynced = new Date().toLocaleTimeString();
-      saveState();
-      syncStatus = 'success:Loaded ' + contacts.length + ' contacts from Sheets.';
-    } else if (Array.isArray(contacts) && contacts.length === 0) {
-      syncStatus = 'empty:Sheet is empty — use Push to send your contacts there.';
-    } else {
-      syncStatus = 'error:Unexpected response. Check your Script URL.';
-    }
-  } catch(e) {
-    syncStatus = 'error:Could not reach Sheets. Check URL and "Anyone" access.';
-  }
-  isLoading = false; render();
-  setTimeout(() => { syncStatus = ''; render(); }, 6000);
+  // CRM is source of truth — Sheets only receives, never sends
+  return;
 }
-
 async function pushToSheets() {
-  const url = (state.settings.sheetsUrl||'').replace(/[/\\]+$/,'');
-  if (!url) { alert('Please enter your Apps Script URL in Settings first.'); return; }
-  isSyncing = true; syncStatus = 'pushing'; render();
-  const CHUNK = 200;
-  const contacts = state.contacts;
-  const headers = Object.keys(contacts[0]);
-  let sent = 0;
-  try {
-    for (let i = 0; i < contacts.length; i += CHUNK) {
-      const chunk = contacts.slice(i, i + CHUNK);
-      const rows = chunk.map(c => headers.map(h => { const v = c[h]; return (v == null) ? '' : v; }));
-      await fetch(url, {
-        method: 'POST', mode: 'no-cors',
-        headers: { 'Content-Type': 'text/plain' },
-        body: JSON.stringify({ action: 'write_chunk', headers, rows, isFirst: i === 0, isLast: i + CHUNK >= contacts.length })
-      });
-      sent += chunk.length;
-      syncStatus = 'pushing:' + sent + ' / ' + contacts.length;
-      render();
-      await new Promise(r => setTimeout(r, 250));
-    }
-    state.settings.lastSynced = new Date().toLocaleTimeString();
-    saveState();
-    syncStatus = 'success:All ' + contacts.length + ' contacts saved to Sheets!';
-  } catch(e) {
-    syncStatus = 'error:Push failed — ' + e.message;
-  }
-  isSyncing = false; render();
-  setTimeout(() => { syncStatus = ''; render(); }, 6000);
-}
-
-async function autoSave() {
-  const url = (state.settings.sheetsUrl||'').replace(/[/\\]+$/,'');
+  const url = (state.settings.sheetsUrl||'').replace(/[\/\\]+$/,'');
   if (!url) return;
+  isSyncing = true; render();
   const CHUNK = 200;
   const contacts = state.contacts;
   const headers = Object.keys(contacts[0]);
   try {
     for (let i = 0; i < contacts.length; i += CHUNK) {
       const chunk = contacts.slice(i, i + CHUNK);
-      const rows = chunk.map(c => headers.map(h => { const v = c[h]; return (v == null) ? '' : v; }));
+      const rows = chunk.map(ct => headers.map(h => { const v = ct[h]; return (v == null) ? '' : v; }));
       await fetch(url, {
         method: 'POST', mode: 'no-cors',
         headers: { 'Content-Type': 'text/plain' },
@@ -483,173 +432,31 @@ async function autoSave() {
     }
     state.settings.lastSynced = new Date().toLocaleTimeString();
     saveState();
+  } catch(e) { console.warn('Push failed:', e); }
+  isSyncing = false; render();
+}
+
+async function autoSave() {
+  const url = (state.settings.sheetsUrl||'').replace(/[\/\\]+$/,'');
+  if (!url) return;
+  const CHUNK = 200;
+  const contacts = state.contacts;
+  if (!contacts.length) return;
+  const headers = Object.keys(contacts[0]);
+  try {
+    for (let i = 0; i < contacts.length; i += CHUNK) {
+      const chunk = contacts.slice(i, i + CHUNK);
+      const rows = chunk.map(ct => headers.map(h => { const v = ct[h]; return (v == null) ? '' : v; }));
+      await fetch(url, {
+        method: 'POST', mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify({ action: 'write_chunk', headers, rows, isFirst: i === 0, isLast: i + CHUNK >= contacts.length })
+      });
+      await new Promise(r => setTimeout(r, 150));
+    }
+    state.settings.lastSynced = new Date().toLocaleTimeString();
+    saveState();
   } catch(e) { console.warn('Auto-save failed:', e); }
-}
-
-// ─── LinkedIn CSV Import ────────────────────────────────────────────────────────
-function handleDrop(e) {
-  e.preventDefault();
-  document.getElementById('dz')?.classList.remove('drag-over');
-  const file = e.dataTransfer.files[0];
-  if (file) processCSV(file);
-}
-function handleFile(input) {
-  if (input.files[0]) processCSV(input.files[0]);
-}
-function processCSV(file) {
-  if (!file.name.endsWith('.csv')) { importStatus = 'error:Please upload a .csv file.'; render(); return; }
-  importStatus = 'loading:Reading file…'; render();
-  const reader = new FileReader();
-  reader.onload = e => {
-    try {
-      const r = mergeCSV(e.target.result);
-      const dupsRemoved = runDedup();
-      importStatus = `success:Done! ${r.added} added · ${r.updated} updated · ${r.skipped} unchanged${dupsRemoved>0?' · '+dupsRemoved+' duplicates removed':''}`;
-      saveState(); autoSave(); render();
-      setTimeout(() => { importStatus = ''; render(); }, 8000);
-    } catch(err) {
-      importStatus = 'error:Parse failed — ' + err.message; render();
-    }
-  };
-  reader.readAsText(file);
-}
-function parseCsvLine(line) {
-  const res = []; let cur = ''; let q = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"') { if (q && line[i+1] === '"') { cur += '"'; i++; } else q = !q; }
-    else if (ch === ',' && !q) { res.push(cur); cur = ''; }
-    else cur += ch;
-  }
-  res.push(cur);
-  return res;
-}
-function mergeCSV(text) {
-  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-  const lines = text.split(/\r?\n/);
-  let hi = 0;
-  for (let i = 0; i < Math.min(lines.length, 10); i++) {
-    if (lines[i].toLowerCase().includes('first name')) { hi = i; break; }
-  }
-  const headers = parseCsvLine(lines[hi]).map(h => h.trim().toLowerCase());
-  const fi = headers.findIndex(h => h.includes('first name'));
-  const li = headers.findIndex(h => h.includes('last name'));
-  const ui = headers.findIndex(h => h.includes('url'));
-  const ei = headers.findIndex(h => h.includes('email'));
-  const ci = headers.findIndex(h => h.includes('company'));
-  const di = headers.findIndex(h => h.includes('connected on'));
-
-  const byUrl = {}; const byName = {};
-  state.contacts.forEach(c => {
-    if (c.linkedin) byUrl[normalizeUrl(c.linkedin)] = c;
-    byName[c.name.toLowerCase().trim()] = c;
-  });
-
-  let added = 0, updated = 0, skipped = 0;
-  for (let i = hi + 1; i < lines.length; i++) {
-    const ln = lines[i].trim(); if (!ln) continue;
-    const cols = parseCsvLine(ln);
-    const fn = fi >= 0 ? (cols[fi]||'').trim() : '';
-    const ln2 = li >= 0 ? (cols[li]||'').trim() : '';
-    const raw = (fn + ' ' + ln2).trim();
-    const name = raw.replace(/[\u{1F000}-\u{1FFFF}]/gu,'').replace(/\s*🔜\s*GDC/g,'').replace(/\s+/g,' ').trim();
-    if (!name) continue;
-    const linkedin = ui >= 0 ? (cols[ui]||'').trim() : '';
-    const email = ei >= 0 ? (cols[ei]||'').trim() : '';
-    const company = ci >= 0 ? (cols[ci]||'').trim() : '';
-    const dateRaw = di >= 0 ? (cols[di]||'').trim() : '';
-    let connDate = '';
-    try { const d = new Date(dateRaw); if (!isNaN(d)) connDate = d.toISOString().split('T')[0]; } catch(e) {}
-
-    const normUrl = normalizeUrl(linkedin);
-    let existing = normUrl ? byUrl[normUrl] : null;
-    if (!existing) existing = byName[name.toLowerCase()];
-
-    if (existing) {
-      let changed = false;
-      if (!existing.linkedin && linkedin) { existing.linkedin = linkedin; changed = true; }
-      if (!existing.email && email) { existing.email = email; changed = true; }
-      if (!existing.company && company) { existing.company = company; changed = true; }
-      if (!existing.connSent) { existing.connSent = 'Yes'; changed = true; }
-      if (!existing.connAccepted) { existing.connAccepted = 'Yes'; changed = true; }
-      changed ? updated++ : skipped++;
-    } else {
-      const nc = {
-        id: Date.now() + '-' + Math.random().toString(36).slice(2),
-        name, company, linkedin, email, mostRecentOutreach: connDate,
-        type:'', city:'', phone:'', connSent:'Yes', connAccepted:'Yes',
-        mostRecentEngagement:'', responseReceived: false, nextSteps:'',
-        reminderEnabled: connDate >= '2026-02-01', noResponseDays: 7, noContactDays: 30
-      };
-      state.contacts.push(nc);
-      if (linkedin) byUrl[normalizeUrl(linkedin)] = nc;
-      byName[name.toLowerCase()] = nc;
-      added++;
-    }
-  }
-  return { added, updated, skipped };
-}
-
-// ─── Email Reminders ────────────────────────────────────────────────────────────
-function buildEmailHtml(contacts, siteUrl, dateStr, isTest) {
-  const cards = contacts.map(ct => {
-    const border = ct.status === 'overdue' ? '#ef4444' : '#f59e0b';
-    const statusBg = ct.status === 'overdue' ? '#fef2f2' : '#fffbeb';
-    const statusColor = ct.status === 'overdue' ? '#991b1b' : '#92400e';
-    const detail = [ct.company, ct.type, ct.city].filter(Boolean).join(' · ');
-    return `
-      <div style="border:1px solid #e5e7eb;border-radius:10px;padding:16px;margin-bottom:12px;border-left:4px solid ${border};background:#ffffff;">
-        <div style="font-size:15px;font-weight:700;color:#111827;margin-bottom:3px;">${ct.name}</div>
-        ${detail ? `<div style="font-size:12px;color:#6b7280;margin-bottom:8px;">${detail}</div>` : ''}
-        <div style="margin-bottom:8px;">
-          <span style="background:${statusBg};color:${statusColor};font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px;">${ct.reason}</span>
-        </div>
-        ${ct.engagement ? `<div style="font-size:12px;color:#6b7280;margin-bottom:4px;"><b style="color:#374151;">Last engagement:</b> ${ct.engagement}</div>` : ''}
-        ${ct.next ? `<div style="font-size:12px;color:#6b7280;margin-bottom:8px;"><b style="color:#374151;">Next steps:</b> ${ct.next}</div>` : ''}
-        <table cellpadding="0" cellspacing="0" border="0" style="margin-top:10px;">
-          <tr>
-            ${ct.email ? `<td style="padding-right:12px;"><a href="mailto:${ct.email}" style="font-size:12px;color:#4f46e5;font-weight:600;text-decoration:none;white-space:nowrap;">Email</a></td>` : ''}
-            ${ct.linkedin ? `<td><a href="${ct.linkedin}" style="font-size:12px;color:#4f46e5;font-weight:600;text-decoration:none;white-space:nowrap;">LinkedIn</a></td>` : ''}
-          </tr>
-        </table>
-      </div>`;
-  }).join('');
-
-  return `<!DOCTYPE html>
-<html>
-<body style="margin:0;padding:0;background:#f3f4f6;font-family:'Helvetica Neue',Arial,sans-serif;">
-<div style="max-width:580px;margin:0 auto;padding:28px 16px;">
-
-  <div style="background:#111827;border-radius:12px 12px 0 0;padding:20px 24px;">
-    <table width="100%" cellpadding="0" cellspacing="0" border="0">
-      <tr>
-        <td style="vertical-align:middle;">
-          <div style="color:#ffffff;font-size:17px;font-weight:700;letter-spacing:-0.02em;">Contact <span style="color:#818cf8;">CRM</span>${isTest ? '&nbsp;<span style="font-size:11px;background:#374151;color:#9ca3af;padding:2px 8px;border-radius:20px;font-weight:500;">TEST</span>' : ''}</div>
-          <div style="color:#9ca3af;font-size:12px;margin-top:4px;">${dateStr}</div>
-        </td>
-        <td style="vertical-align:middle;text-align:right;white-space:nowrap;">
-          <span style="background:#312e81;border-radius:8px;padding:6px 14px;color:#a5b4fc;font-size:12px;font-weight:600;display:inline-block;">${contacts.length} Contact${contacts.length!==1?'s':''}</span>
-        </td>
-      </tr>
-    </table>
-  </div>
-
-  <div style="background:#f9fafb;padding:24px 24px 20px;border-left:1px solid #e5e7eb;border-right:1px solid #e5e7eb;">
-    <p style="font-family:'Brush Script MT','Segoe Script','Comic Sans MS',cursive;font-size:36px;font-weight:400;color:#111827;margin:0 0 6px;text-align:center;">Good Morning, Matt Edelman</p>
-    <p style="color:#6b7280;font-size:13px;margin:0 0 20px;text-align:center;">Here are the people you should reach out to today:</p>
-    ${cards}
-    <div style="text-align:center;margin-top:24px;">
-      <a href="${siteUrl}" style="display:inline-block;background:#4f46e5;color:#ffffff;padding:12px 32px;border-radius:8px;font-size:14px;font-weight:600;text-decoration:none;letter-spacing:-0.01em;">Open CRM →</a>
-    </div>
-  </div>
-
-  <div style="background:#f9fafb;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 12px 12px;padding:14px 24px;text-align:center;">
-    <p style="color:#9ca3af;font-size:11px;margin:0;">Sent by your Contact CRM · Replies go to ${contacts[0]?.replyTo || 'you'}</p>
-  </div>
-
-</div>
-</body>
-</html>`;
 }
 
 async function sendTestEmail() {
@@ -783,6 +590,7 @@ function saveSettings() {
     ejsServiceId: document.getElementById('s-svc')?.value.trim() || '',
     ejsTemplateId: document.getElementById('s-tpl')?.value.trim() || '',
     ejsPublicKey: document.getElementById('s-key')?.value.trim() || '',
+    sheetsUrl: (document.getElementById('s-sheets')?.value.trim() || '').replace(/[\/\\]+$/,''),
     sheetsUrl: (document.getElementById('s-sheets')?.value.trim() || '').replace(/[/\\]+$/,'')
   };
   saveState();
@@ -850,7 +658,7 @@ function renderTopbar(dueCount) {
       </nav>
     </div>
     <div style="display:flex;align-items:center;gap:8px;">
-      ${state.settings.sheetsUrl ? `<span style="font-size:12px;color:var(--text3);">${isSyncing?'<span style="color:var(--indigo);">Saving…</span>':'Sheets connected'}</span>` : ''}
+
       ${!showForm&&!currentContactId?`<button class="btn btn-primary btn-sm" onclick="openNew()">+ Add contact</button>`:''}
     </div>
   </div>`;
@@ -982,6 +790,7 @@ function renderContacts() {
             return `<tr onclick="openContact('${c.id}')">
               <td>
                 <div style="display:flex;align-items:center;gap:8px;">
+        ${state.settings.sheetsUrl?`<span style="font-size:12px;color:var(--text3);">${isSyncing?'<span style="color:var(--indigo);">Saving…</span>':'● Sheets'}</span>`:''}
                   <div class="avatar" style="background:${av.bg};color:${av.fg};">${av.initials}</div>
                   <div>
                     <div style="font-weight:600;white-space:nowrap;">${esc(c.name)}</div>
@@ -1254,10 +1063,10 @@ function renderSettings() {
         <div class="card-header">
           <div>
             <div style="font-size:14px;font-weight:600;">Google Sheets sync ${s.sheetsUrl?'<span style="color:var(--green);font-size:12px;font-weight:500;margin-left:6px;">✓ connected</span>':''}</div>
-            <div style="font-size:12px;color:var(--text2);margin-top:2px;">All contacts read from and written to your Sheet in real time.</div>
+            <div style="font-size:12px;color:var(--text2);margin-top:2px;">Sheets mirrors your CRM. Every change here is pushed to Sheets automatically.</div>
           </div>
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-            ${s.sheetsUrl?`<button class="btn btn-sm" onclick="pullFromSheets()" ${isLoading?'disabled':''}>↓ Pull</button><button class="btn btn-sm btn-primary" onclick="pushToSheets()" ${isSyncing?'disabled':''}>↑ Push all</button>`:''}
+          <div style="display:flex;gap:8px;align-items:center;">
+            ${s.sheetsUrl?`<button class="btn btn-sm btn-primary" onclick="pushToSheets()">↑ Push all to Sheet</button>`:''}
             <button class="btn btn-sm" onclick="const r=runDedup();saveState();syncStatus='success:Removed '+r+' duplicates. '+state.contacts.length+' contacts remaining.';render();setTimeout(()=>{syncStatus='';render();},4000);">🧹 Remove duplicates</button>
           </div>
         </div>
@@ -1266,10 +1075,10 @@ function renderSettings() {
             <label class="label">Apps Script URL</label>
             <input class="input" id="s-sheets" value="${esc(s.sheetsUrl)}" placeholder="https://script.google.com/macros/s/…/exec">
           </div>
-          ${syncMsg ? `<div class="status-msg status-${syncType}">${syncMsg}</div>` : ''}
-          ${s.lastSynced?`<div style="font-size:12px;color:var(--text3);margin-top:8px;">Last synced: ${s.lastSynced}</div>`:''}
+          ${s.lastSynced?`<div style="font-size:12px;color:var(--text3);margin-top:6px;">Last saved: ${s.lastSynced}</div>`:''}
+          ${syncMsg?`<div class="status-msg status-${syncType}" style="margin-top:10px;">${syncMsg}</div>`:''}
           <div class="info-box" style="margin-top:12px;">
-            <b>Setup:</b> Open your Google Sheet → Extensions → Apps Script → paste the <code>CRM_AppsScript.gs</code> code → Save → Deploy as web app (Execute as: Me, Anyone access) → copy URL above.
+            <b>Setup:</b> Open your Google Sheet → Extensions → Apps Script → paste <code>CRM_AppsScript.gs</code> → Save → Deploy as web app (Execute as: Me, Anyone) → copy URL above → Save settings.
           </div>
         </div>
       </div>
@@ -1335,7 +1144,8 @@ function renderSettings() {
 
 // ─── Init ───────────────────────────────────────────────────────────────────────
 render();
-if (state.settings.sheetsUrl) pullFromSheets();
+setTimeout(() => { if(state.settings.sheetsUrl && state.contacts.length > 0) autoSave(); }, 2000);
+
 
 </script>
 </body>
